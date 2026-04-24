@@ -1,0 +1,11 @@
+# Build artifacts and KLEE outputs live under $WORK (default ./build/).
+build/
+*.bc
+*.gcda
+*.gcno
+*.gcov
+klee-out/
+klee-last
+results.log
+results/
+*.log

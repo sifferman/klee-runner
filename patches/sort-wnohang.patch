@@ -1,0 +1,20 @@
+--- a/src/sort.c
++++ b/src/sort.c
+@@ -25,6 +25,18 @@
+ #include <getopt.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
++
++/* Glibc 2.28+ hides the W* macros from <sys/wait.h> when _STDLIB_H is already
++   defined AND __USE_XOPEN2K8 is defined (which happens with _GNU_SOURCE).
++   gnulib's 6.11-era wrappers leave WNOHANG / WIFEXITED / WEXITSTATUS undefined
++   in this path. Provide fallbacks so sort.c still compiles. */
++#ifndef WNOHANG
++# define WNOHANG 1
++# define WIFEXITED(status)   (((status) & 0x7f) == 0)
++# define WEXITSTATUS(status) (((status) & 0xff00) >> 8)
++#endif
++
+ #include <signal.h>
+ #include "system.h"
+ #include "argmatch.h"
