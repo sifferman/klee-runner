@@ -24,13 +24,13 @@
 I reproduced Cadar's Table~2 and Figure~5 from the OSDI'08 KLEE
 paper using the official \texttt{klee/klee:3.1} Docker image,
 running KLEE on 98 Coreutils 6.11 utilities for 60~min per tool.
-I measured 69.95\% overall line coverage (paper: 84.5\%) and
+I measured 69.95\% overall (aggregate) line-coverage (paper: 84.5\%) and
 85.25\% per-tool median (paper: 94.7\%). The shape of the per-tool
 curve closely matches the paper; the level gap is explained by
 parallel-execution contention and a \texttt{libgcov}
 crash-corruption issue I identified. I also applied KLEE to
 \texttt{tinyexpr}, a small expression-parser library not covered
-by the paper, achieving 63\% line and 70\% branch coverage in 60 minutes.
+by the paper, achieving 63\% line-coverage and 70\% branch-coverage in 60 minutes.
 Code and reproduction scripts:
 \url{https://github.com/sifferman/klee-runner}.
 \end{abstract}
@@ -46,39 +46,39 @@ concrete inputs, it runs the program on placeholder
 uses an SMT solver to derive a concrete input that drives each
 reachable path. \textsc{Klee} applies this to C programs compiled
 to LLVM bitcode (clang's intermediate representation). The paper
-claims this achieves high line coverage on GNU Coreutils without
+claims this achieves high line-coverage on GNU Coreutils without
 per-tool specifications.
 
 \Q{2}{Hypothesis} Symbolic execution can automatically generate
 high-coverage tests on complex, environmentally-intensive
 real-world programs without per-program manual modeling.
 
-\Q{3}{Original setup} Each of 89 Coreutils 6.10 utilities is
+\Q{3}{Original setup} Each of 89 Coreutils 6.10 utilities was
 compiled to LLVM bitcode and run under \textsc{Klee} for at most
 60~min on a 2008-era machine, sequentially. Symbolic input: up to
 three argv strings, two 8-byte files, 8 bytes of \texttt{stdin}.
-Each tool runs twice: once normally, and once with
+Each tool ran twice: once normally, and once with
 \texttt{--max-fail 1}, which makes \textsc{Klee} additionally
 explore paths where one POSIX system call returns an error so the
-tool's error-handling code is exercised. The two runs' tests are
+tool's error-handling code is exercised. The two runs' tests were
 replayed through a \texttt{gcov}-instrumented native build.
 
 \Q{4}{Original results and support} Cadar's Table~2 reports 84.5\% Base+Fail
-aggregate line coverage (covered lines divided by total lines
+overall (aggregate) line-coverage (covered lines divided by total lines
 summed across tools), 94.7\% per-tool median, 90.9\% mean, with
 16/89 tools at 100\% and 56/89 at $\geq$90\%. The Base-only
-aggregate is 79.9\%. These clearly support the hypothesis.
+overall is 79.9\%. These support the hypothesis.
 
 \section{My Setup}
 
 \Q{5}{How my setup differs} I use the official
 \texttt{klee/klee:3.1} Docker image (KLEE~3.1, LLVM~13, STP, Z3,
-\texttt{klee-uclibc}), pinned by digest, and Coreutils~6.11 (one
+\texttt{klee-uclibc}), provided by the autors, and Coreutils~6.11 (one
 dot release later than the paper). The KLEE flag set matches
 Cadar's Section~5.2, with the symbolic argument grammar from
 the modern KLEE Coreutils tutorial. Three deliberate deviations:
 \emph{(a)} parallelism, the paper ran sequentially while I ran
-10--24 KLEE instances concurrently to fit a class budget (each
+10--24 KLEE instances concurrently (each
 capped at 1~GB, sharing solver subprocesses and memory bandwidth);
 \emph{(b)} version, pre-release 2008 KLEE vs.\ mine at 3.1;
 \emph{(c)} tool count, my build produces 98 utilities vs.\ the
@@ -98,7 +98,7 @@ constraints.
 operations: out-of-bounds memory access, null dereferences, double
 frees, division by zero, overflow checks, and programmer-written
 \texttt{assert()}/\texttt{abort()}. Functional-correctness errors
-need an oracle and are out of scope.
+need an ``oracle'' and are out of scope.
 
 \section{Results}
 
@@ -130,18 +130,18 @@ Base-only overall is 68.21\%. Paper: 84.5\%, 94.7\%, 90.9\%,
 tail (\texttt{ls}, \texttt{pwd}, \texttt{sort}, \texttt{su},
 \texttt{dd}), middle plateau, 100\%-cluster on the right. The
 paper calls out \texttt{pwd} as its worst tool at 21.2\% Base; I
-measure 20.5\%, a near-exact match.
+measured 20.5\%, a near-exact match.
 
 \textbf{Why my numbers fall short.} \emph{(1) Parallelism tax}
 (largest): constraint solving dominates KLEE's runtime, and
 10-way contention reduces effective CPU-minutes per run; a
 sequential rerun would cost $\sim$98 CPU-hours, which I did not
-budget. \emph{(2) Measurement-script gaps}: the SHA-family
+have time for. \emph{(2) Measurement-script gaps}: the SHA-family
 binaries actually compile from \texttt{md5sum.c} via preprocessor
 flags, and \texttt{dir}/\texttt{ginstall} likewise come from
 \texttt{ls.c}/\texttt{install.c}. My script greps gcov's output
 for the exact filename and finds nothing, so $\sim$10 utilities
-drop out of the aggregate. \emph{(3) Paper's per-tool tuning}:
+drop out of my overall measurement. \emph{(3) Paper's per-tool tuning}:
 the authors increased argument size for eight tools after
 consulting \texttt{man} pages; I use a single fixed grammar.
 
@@ -155,8 +155,8 @@ fix in \texttt{src/sort.c} make it build cleanly.
 \textbf{The \texttt{mv} \texttt{libgcov} bug.} For \texttt{mv}, my
 Base+Fail measurement gave 85.71\%, lower than Base-alone's
 94.51\%, which is mathematically impossible: the combined run
-replays a strict superset of Base's tests. Investigation showed
-one \texttt{--max-fail 1} test crashes \texttt{mv} via
+should have included all of Base's tests at minimum. Investigation showed
+that one \texttt{--max-fail 1} test crashed \texttt{mv} via
 \texttt{abort()}; \texttt{libgcov}'s hook that updates the shared
 \texttt{.gcda} coverage file runs only partially on a crash,
 leaving the file unparseable. The next \texttt{klee-replay} reads
@@ -180,22 +180,22 @@ expired), and the replayed tests covered 63.01\% of 365 source
 lines and 69.89\% of 269 branches in \texttt{tinyexpr.c}.
 \textsc{Klee} became solver-bound (TSolver $>$~99\%) within
 minutes: tinyexpr's tokenizer calls uclibc's \texttt{strtod} on
-every digit, and \texttt{strtod} is highly branchy. The methodology
+every digit, and \texttt{strtod} has many branches. The methodology
 ports cleanly, but constraint explosion is more pronounced than on
 the paper's CLI tools, suggesting parsers are a harder target for
 symbolic execution than the command-line utilities the paper
-chose.
+evaluated.
 
 \section{Discussion}
 
-\Q{7}{Does the hypothesis still hold} Yes, convincingly. My
-per-tool curve shape matches the paper's; 88\% of measured
+\Q{7}{Does the hypothesis still hold} Yes. My
+per-tool curve shape matches the paper's. 88\% of measured
 Coreutils tools exceed 60\% coverage, 41\% exceed 90\%, and the
 median is 85.25\%. That is below the paper's 94.7\% but
 unambiguously ``high coverage, unassisted, on real code,'' which
-is the hypothesis. The shortfall is explained by factors
-orthogonal to the algorithm (parallelism contention, measurement
-artifacts), not by a breakdown of the technique. The
+is the hypothesis. The shortfall is explained by factors likely
+unrelated to the algorithm: parallelism contention and measurement
+artifacts. The
 \texttt{tinyexpr} extension reinforces this: the same methodology
 ported to a parser library outside the paper's chosen targets and
 still produced respectable coverage (63\% lines, 70\% branches),
