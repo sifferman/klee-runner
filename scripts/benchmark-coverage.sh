@@ -31,6 +31,13 @@ WORK="${WORK:-$REPO/build}"
 JOBS="${JOBS:-${1:-10}}"
 MINUTES="${MINUTES:-${2:-60}}"
 
+# Self-heal: the KLEE container occasionally strips mode bits on $WORK
+# subdirs to 000 on WSL, which silently breaks `[ -d ... ]` traversal in
+# Phase 2 and produces an almost-empty CSV. Restore traverse + read perms
+# before doing anything else. -X means "execute bit only on dirs", so this
+# doesn't make every regular file executable.
+chmod -R u+rwX "$WORK" 2>/dev/null || true
+
 SRC_DIR="$WORK/coreutils-6.11/obj-llvm/src"
 if [ ! -d "$SRC_DIR" ]; then
     echo "error: no build tree at $SRC_DIR — run ./scripts/setup.sh first" >&2
@@ -92,47 +99,63 @@ else
     log "phase 1b: skipped (NO_FAIL=1)"
 fi
 
-log "phase 2: gcov replay (serial)"
-echo "tool,lines_pct,lines_total,branches_pct,branches_total" > "$CSV"
+log "phase 2: gcov replay (serial, base + combined per tool)"
+# Wide CSV so the plot can stack Base under Base+Fail. lines_total and
+# branches_total are mode-independent (same source file), so one column each.
+echo "tool,lines_pct_base,lines_pct_combined,lines_total,branches_pct_base,branches_pct_combined,branches_total" > "$CSV"
+
+# Extract "81.42" from "Lines executed:81.42% of 113"
+extract_pct()   { awk -F'[:%]' '/^Lines executed/    {gsub(/ /,"",$2); print $2}'; }
+extract_lines() { awk -F'of '  '/^Lines executed/    {gsub(/ /,"",$2); print $2}'; }
+extract_bpct()  { awk -F'[:%]' '/^Branches executed/ {gsub(/ /,"",$2); print $2}'; }
+extract_btot()  { awk -F'of '  '/^Branches executed/ {gsub(/ /,"",$2); print $2}'; }
+
 for t in $TOOLS; do
-    out=$("$REPO/scripts/measure-coverage.sh" "$t" 2>&1 || true)
-    printf '\n=== %s ===\n%s\n' "$t" "$out" >> "$LOG"
-    lp=$(printf '%s\n' "$out" | awk -F'[:%]' '/^Lines executed/    {gsub(/ /,"",$2); print $2}')
-    lt=$(printf '%s\n' "$out" | awk -F'of '   '/^Lines executed/    {gsub(/ /,"",$2); print $2}')
-    bp=$(printf '%s\n' "$out" | awk -F'[:%]' '/^Branches executed/ {gsub(/ /,"",$2); print $2}')
-    bt=$(printf '%s\n' "$out" | awk -F'of '   '/^Branches executed/ {gsub(/ /,"",$2); print $2}')
-    printf '%s,%s,%s,%s,%s\n' "$t" "$lp" "$lt" "$bp" "$bt" >> "$CSV"
+    out_base=$(MODE=base     "$REPO/scripts/measure-coverage.sh" "$t" 2>&1 || true)
+    out_comb=$(MODE=combined "$REPO/scripts/measure-coverage.sh" "$t" 2>&1 || true)
+    printf '\n=== %s (base) ===\n%s\n=== %s (combined) ===\n%s\n' \
+        "$t" "$out_base" "$t" "$out_comb" >> "$LOG"
+
+    lp_b=$(printf '%s\n' "$out_base" | extract_pct)
+    lp_c=$(printf '%s\n' "$out_comb" | extract_pct)
+    lt=$(  printf '%s\n' "$out_comb" | extract_lines)
+    bp_b=$(printf '%s\n' "$out_base" | extract_bpct)
+    bp_c=$(printf '%s\n' "$out_comb" | extract_bpct)
+    bt=$(  printf '%s\n' "$out_comb" | extract_btot)
+
+    printf '%s,%s,%s,%s,%s,%s,%s\n' "$t" "$lp_b" "$lp_c" "$lt" "$bp_b" "$bp_c" "$bt" >> "$CSV"
 done
 log "phase 2: done"
 
-# Aggregates matching the paper's Table 2 columns. Uses external sort instead
-# of gawk's asort() so it works under mawk.
-sorted=$(awk -F, 'NR>1 && $2!="" {print $2+0}' "$CSV" | sort -n)
-if [ -z "$sorted" ]; then
-    log "no successful tools — skipping aggregates"
-else
+# Aggregate/median/mean for both modes, side-by-side. Uses external sort (no
+# gawk-isms) so it runs under mawk.
+summarize() {
+    local col="$1" total_col="$2" label="$3"
+    local sorted
+    sorted=$(awk -F, -v c="$col" 'NR>1 && $c!="" {print $c+0}' "$CSV" | sort -n)
+    [ -z "$sorted" ] && { printf '  %-40s no data\n' "$label"; return; }
+    local n mean med agg c100 c90 mid lo hi
     n=$(printf '%s\n' "$sorted" | wc -l)
     mean=$(printf '%s\n' "$sorted" | awk '{s+=$1} END {printf "%.2f", s/NR}')
     mid=$(( (n + 1) / 2 ))
     if [ $((n % 2)) -eq 1 ]; then
-        median=$(printf '%s\n' "$sorted" | sed -n "${mid}p")
+        med=$(printf '%s\n' "$sorted" | sed -n "${mid}p")
     else
         lo=$(printf '%s\n' "$sorted" | sed -n "${mid}p")
         hi=$(printf '%s\n' "$sorted" | sed -n "$((mid+1))p")
-        median=$(printf '%s %s\n' "$lo" "$hi" | awk '{printf "%.2f", ($1+$2)/2}')
+        med=$(printf '%s %s\n' "$lo" "$hi" | awk '{printf "%.2f", ($1+$2)/2}')
     fi
-    agg=$(awk -F, 'NR>1 && $2!="" {c+=$2*$3/100; t+=$3} END {if (t>0) printf "%.2f", c/t*100}' "$CSV")
+    agg=$(awk -F, -v c="$col" -v tc="$total_col" 'NR>1 && $c!="" {cv+=$c*$tc/100; tt+=$tc} END {if (tt>0) printf "%.2f", cv/tt*100}' "$CSV")
     c100=$(printf '%s\n' "$sorted" | awk '$1+0 >= 99.9' | wc -l)
-    c90=$(printf '%s\n'  "$sorted" | awk '$1+0 >= 90'   | wc -l)
-    {
-        echo "=== Table 2 reproduction ==="
-        printf '  successful tools:          %s / %s\n' "$n" "$N"
-        printf '  aggregate (weighted) cov:  %s %%\n'   "$agg"
-        printf '  mean per-tool coverage:    %s %%\n'   "$mean"
-        printf '  median per-tool coverage:  %s %%\n'   "$median"
-        printf '  tools at 100%%:             %s\n'     "$c100"
-        printf '  tools at >= 90%%:           %s\n'     "$c90"
-    } | tee -a "$LOG"
-fi
+    c90=$( printf '%s\n' "$sorted" | awk '$1+0 >= 90'   | wc -l)
+    printf '  %-40s overall=%s%%  median=%s%%  mean=%s%%  100%%=%s  >=90%%=%s  (n=%s)\n' \
+        "$label" "$agg" "$med" "$mean" "$c100" "$c90" "$n"
+}
+
+{
+    echo "=== Table 2 reproduction ==="
+    summarize 2 4 "standard run (Base):"
+    summarize 3 4 "with --max-fail 1 (Base+Fail):"
+} | tee -a "$LOG"
 
 log "done"

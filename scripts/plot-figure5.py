@@ -2,9 +2,13 @@
 """plot-figure5.py — reproduce Figure 5 of Cadar et al. 2008.
 
 Reads results/coverage.csv (produced by benchmark-coverage.sh) and writes
-an SVG in the same style as the paper's Figure 5: per-tool line coverage
-sorted ascending, y-axis 0-100%. Overlays six reference lines — the paper's
-three Table 2 stats (dashed) and our three matching stats (solid).
+an SVG in the style of the paper's Figure 5: per-tool line coverage sorted
+ascending, two-tone bars showing how much extra coverage syscall-failure
+injection buys you. Black bar = Base+Fail (taller); gray bar in front =
+Base only — the visible black above the gray is the fail-injection bonus.
+
+Six horizontal reference lines: paper's three Table 2 stats (dashed) and
+our three matching stats (solid).
 
 Matplotlib infers format from the --out extension, so pass --out
 results/figure5.png if you want a raster image instead.
@@ -45,20 +49,53 @@ COLOR_MEAN    = "tab:green"
 
 
 def load(csv_path: pathlib.Path):
+    """Read the wide CSV. Falls back to the old single-column format if the
+    new columns aren't present (so old coverage.csv files still plot, just
+    without the two-tone bars).
+
+    Mathematical invariant: Base+Fail combined coverage is the union of
+    Base alone and Fail-only ktests, so combined >= base always. A
+    measurement violating this (libgcov's .gcda file isn't crash-safe — a
+    fail-injection replay that aborts mid-write can corrupt the shared
+    counters and produce combined < base) is clamped to base, with a
+    warning emitted to stderr."""
     rows = []
+    anomalies = []
     with csv_path.open() as f:
-        for r in csv.DictReader(f):
-            if not r["lines_pct"]:
-                continue
-            rows.append((r["tool"], float(r["lines_pct"]), int(r["lines_total"])))
-    rows.sort(key=lambda r: r[1])
-    return rows
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+        wide = "lines_pct_combined" in cols
+        for r in reader:
+            if wide:
+                if not r["lines_pct_combined"]:
+                    continue
+                base = float(r["lines_pct_base"]) if r["lines_pct_base"] else 0.0
+                comb = float(r["lines_pct_combined"])
+                if comb < base:
+                    anomalies.append((r["tool"], base, comb))
+                    comb = base
+                total = int(r["lines_total"])
+            else:
+                if not r["lines_pct"]:
+                    continue
+                base = comb = float(r["lines_pct"])
+                total = int(r["lines_total"])
+            rows.append({"tool": r["tool"], "base": base, "combined": comb, "total": total})
+    if anomalies:
+        print(f"warning: clamped combined<base for {len(anomalies)} tool(s) "
+              f"(libgcov .gcda corruption from crashing fail-injection replays):",
+              file=sys.stderr)
+        for t, b, c in anomalies:
+            print(f"  {t}: raw combined={c:.2f}% < base={b:.2f}%, plotting {b:.2f}%",
+                  file=sys.stderr)
+    rows.sort(key=lambda r: r["combined"])
+    return rows, wide
 
 
-def summarize(rows):
-    cov = [r[1] for r in rows]
-    total_covered = sum(r[1] * r[2] / 100 for r in rows)
-    total_lines = sum(r[2] for r in rows)
+def summarize(rows, key):
+    cov = [r[key] for r in rows]
+    total_covered = sum(r[key] * r["total"] / 100 for r in rows)
+    total_lines = sum(r["total"] for r in rows)
     return {
         "n": len(rows),
         "weighted": total_covered / total_lines * 100 if total_lines else 0,
@@ -78,19 +115,28 @@ def main():
     if not csv_path.exists():
         sys.exit(f"error: no CSV at {csv_path} — run ./scripts/benchmark-coverage.sh first")
 
-    rows = load(csv_path)
+    rows, wide = load(csv_path)
     if not rows:
         sys.exit(f"error: {csv_path} has no parseable rows")
-    summary = summarize(rows)
-    tools = [r[0] for r in rows]
-    cov = [r[1] for r in rows]
+    summary = summarize(rows, "combined")
+    tools    = [r["tool"]     for r in rows]
+    base     = [r["base"]     for r in rows]
+    combined = [r["combined"] for r in rows]
 
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.bar(range(len(cov)), cov, width=0.9, color="black", edgecolor="black")
+    xs = range(len(rows))
+    # Draw the taller (combined) bars first in black, then the shorter (base)
+    # bars in light gray on top — the visible black above each gray bar is
+    # the coverage gained from --max-fail 1 syscall failure injection.
+    ax.bar(xs, combined, width=0.9, color="black",     edgecolor="black",
+           label="Base + Fail (with syscall failure injection)")
+    if wide:
+        ax.bar(xs, base, width=0.9, color="lightgray", edgecolor="black",
+               linewidth=0.3, label="Base (standard run)")
     ax.set_ylim(0, 100)
-    ax.set_xlim(-0.5, len(cov) - 0.5)
+    ax.set_xlim(-0.5, len(rows) - 0.5)
     ax.set_ylabel("Coverage (ELOC %)")
-    ax.set_xticks(range(len(tools)))
+    ax.set_xticks(list(xs))
     ax.set_xticklabels(tools, rotation=90, fontsize=9)
     ax.tick_params(axis="x", pad=1)
 
@@ -110,14 +156,18 @@ def main():
     ax.legend(loc="lower right", fontsize=9, framealpha=0.9)
     ax.set_title(
         f"KLEE line coverage on {summary['n']} coreutils tools "
-        f"(60 min/tool, 10-way parallel)"
+        f"(60 min/tool per run, Base + Base+Fail unioned)"
     )
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     print(f"wrote {out_path}")
-    print(f"  n={summary['n']}  agg={summary['weighted']:.2f}%  "
-          f"mean={summary['mean']:.2f}%  median={summary['median']:.2f}%")
+    print(f"  n={summary['n']}  combined-overall={summary['weighted']:.2f}%  "
+          f"combined-mean={summary['mean']:.2f}%  combined-median={summary['median']:.2f}%")
+    if wide:
+        b = summarize(rows, "base")
+        print(f"            base-overall={b['weighted']:.2f}%  "
+              f"base-mean={b['mean']:.2f}%  base-median={b['median']:.2f}%")
 
 
 if __name__ == "__main__":
