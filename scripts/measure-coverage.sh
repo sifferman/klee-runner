@@ -22,11 +22,17 @@ WORK="${WORK:-$REPO/build}"
 IMAGE="${KLEE_IMAGE:-klee/klee@sha256:05e56e17d88ed02f2872ec2ec78e7c4282d0328dc203d0a5f05cc1d458688d8f}"
 COREUTILS_DIR="coreutils-6.11"
 
-KTEST_DIR="$WORK/klee-out/$TOOL"
 GCOV_BIN="$WORK/$COREUTILS_DIR/obj-gcov/src/$TOOL"
 
-if [ ! -d "$KTEST_DIR" ]; then
-    echo "error: no KLEE output at $KTEST_DIR — run ./scripts/run-klee.sh $TOOL first" >&2
+# Replay ktests from BOTH the standard run and the --max-fail run (if present)
+# into a single gcov session — this gives Base+Fail unioned coverage, matching
+# the paper's Table 2 methodology.
+HAVE_ANY=0
+for d in "$WORK/klee-out/$TOOL" "$WORK/klee-out-fail/$TOOL"; do
+    [ -d "$d" ] && HAVE_ANY=1
+done
+if [ "$HAVE_ANY" -eq 0 ]; then
+    echo "error: no KLEE output for $TOOL under $WORK/klee-out{,/fail}/ — run ./scripts/run-klee.sh $TOOL first" >&2
     exit 1
 fi
 if [ ! -x "$GCOV_BIN" ]; then
@@ -41,9 +47,12 @@ docker run --rm --ulimit stack=-1:-1 -v "$WORK:/work" "$IMAGE" bash -lc "
     set -e
     cd /work/$COREUTILS_DIR/obj-gcov/src
     rm -f *.gcda
-    # -k: kill the process after the test replay timeout
-    for t in /work/klee-out/$TOOL/test*.ktest; do
-        KLEE_REPLAY_TIMEOUT=3 klee-replay ./$TOOL \$t 2>/dev/null || true
+    for dir in /work/klee-out/$TOOL /work/klee-out-fail/$TOOL; do
+        [ -d \"\$dir\" ] || continue
+        for t in \"\$dir\"/test*.ktest; do
+            [ -f \"\$t\" ] || continue
+            KLEE_REPLAY_TIMEOUT=3 klee-replay ./$TOOL \"\$t\" 2>/dev/null || true
+        done
     done
     echo '==> Coverage report:'
     gcov -b $TOOL 2>&1 | grep -A2 \"File '../../src/$TOOL.c'\"

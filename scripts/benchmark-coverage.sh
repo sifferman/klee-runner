@@ -3,16 +3,22 @@
 # KLEE on every coreutils tool in the build tree and measuring gcov line
 # coverage.
 #
-# Two phases:
-#   1. KLEE runs in parallel, one container per tool. Each run uses the
-#      paper's flags (see run-klee.sh) with --max-time=<MINUTES>.
-#   2. klee-replay + gcov runs serially. Parallelizing would corrupt .gcda
-#      files for the shared gnulib objects that every coreutils tool links.
+# Three phases:
+#   1a. Standard KLEE run (no failure injection). Parallel; skips any tool
+#       that already has ktests under build/klee-out/<tool>/.
+#   1b. --max-fail 1 run (syscall failure injection). Parallel; skips any
+#       tool that already has ktests under build/klee-out-fail/<tool>/.
+#   2.  klee-replay + gcov, serial. Replays both phase-1 outputs into the
+#       same gcov session, producing Base+Fail unioned coverage.
+#
+# Incremental: re-running the script is safe. Existing ktests from prior
+# runs are reused; only missing outputs are regenerated.
 #
 # Usage:
 #   ./scripts/benchmark-coverage.sh                   # default 10 jobs, 60 min
 #   ./scripts/benchmark-coverage.sh <jobs> <minutes>
 #   JOBS=4 MINUTES=10 ./scripts/benchmark-coverage.sh
+#   NO_FAIL=1 ./scripts/benchmark-coverage.sh         # skip the fail-injection pass
 #
 # Outputs (under results/):
 #   coverage.csv           per-tool line/branch coverage
@@ -47,12 +53,44 @@ log "benchmark: $N tools, $JOBS parallel, ${MINUTES} min each"
 log "log: $LOG"
 log "csv: $CSV"
 
-log "phase 1: KLEE (parallel)"
-printf '%s\n' "$TOOLS" \
-    | xargs -n1 -P "$JOBS" -I{} "$REPO/scripts/run-klee.sh" {} "$MINUTES" \
-        >> "$LOG" 2>&1 \
-    || log "phase 1: some tools exited non-zero (continuing)"
-log "phase 1: done"
+# Emit only the tools that lack ktests in the given output dir (so xargs
+# doesn't redo work from previous runs).
+missing_in() {
+    local subdir="$1"
+    for t in $TOOLS; do
+        if ! ls "$WORK/$subdir/$t"/test*.ktest >/dev/null 2>&1; then
+            printf '%s\n' "$t"
+        fi
+    done
+}
+
+log "phase 1a: standard KLEE run (parallel, skipping existing)"
+todo=$(missing_in "klee-out")
+n_todo=$(printf '%s' "$todo" | grep -c . || true)
+log "  $n_todo tools to run (others already have ktests)"
+if [ "$n_todo" -gt 0 ]; then
+    printf '%s\n' "$todo" \
+        | xargs -n1 -P "$JOBS" -I{} "$REPO/scripts/run-klee.sh" {} "$MINUTES" \
+            >> "$LOG" 2>&1 \
+        || log "phase 1a: some tools exited non-zero (continuing)"
+fi
+log "phase 1a: done"
+
+if [ -z "${NO_FAIL:-}" ]; then
+    log "phase 1b: --max-fail 1 run (parallel, skipping existing)"
+    todo=$(missing_in "klee-out-fail")
+    n_todo=$(printf '%s' "$todo" | grep -c . || true)
+    log "  $n_todo tools to run (others already have ktests)"
+    if [ "$n_todo" -gt 0 ]; then
+        printf '%s\n' "$todo" \
+            | xargs -n1 -P "$JOBS" -I{} "$REPO/scripts/run-klee.sh" {} "$MINUTES" 1 \
+                >> "$LOG" 2>&1 \
+            || log "phase 1b: some tools exited non-zero (continuing)"
+    fi
+    log "phase 1b: done"
+else
+    log "phase 1b: skipped (NO_FAIL=1)"
+fi
 
 log "phase 2: gcov replay (serial)"
 echo "tool,lines_pct,lines_total,branches_pct,branches_total" > "$CSV"

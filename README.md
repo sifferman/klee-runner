@@ -93,6 +93,15 @@ from §5.2 of the paper (mirrored in the KLEE repo's
 binary, then runs `gcov` and prints the line-coverage percentage for that
 tool's `.c` file.
 
+**`scripts/benchmark-coverage.sh [jobs] [minutes]`** runs the full Table 2
+experiment: KLEE on every tool in the build (defaults `10 60` — 10 parallel,
+60 min each), then serial gcov replay. Writes `results/coverage.csv` and a
+timestamped log under `results/`. Prints aggregate/mean/median summary.
+
+**`scripts/plot-figure5.py`** reads `results/coverage.csv` and writes an SVG
+in the style of the paper's Figure 5 (per-tool coverage sorted ascending,
+with reference lines for the paper's aggregate numbers and ours).
+
 ## Running on many tools
 
 The paper reports over 89 tools × 60 min = 89 CPU-hours. For a class project
@@ -106,6 +115,16 @@ for t in echo yes true false pwd nohup tee comm expr od seq tr paste pr; do
 done
 ```
 
+Or, to reproduce the full Table 2 / Figure 5 in one go:
+
+```bash
+# ~9 wall-hours at 10-way parallel on a 22-core / 15 GB host.
+./scripts/benchmark-coverage.sh 10 60
+
+# Plot the result (defaults to results/coverage.csv → results/figure5.svg).
+./scripts/plot-figure5.py
+```
+
 ## Layout
 
 ```
@@ -117,12 +136,18 @@ references/             # paper + assignment (git-ignored contents)
 patches/
 └── sort-wnohang.patch  # local coreutils-6.11 patch
 scripts/
-├── setup.sh            # pull image, build coreutils (both variants)
-├── run-klee.sh         # KLEE on one tool (paper's flags)
-└── measure-coverage.sh # klee-replay + gcov on one tool
-build/                  # default $WORK — git-ignored
-├── coreutils-6.11/     #   obj-gcov/ and obj-llvm/ builds
-└── klee-out/<tool>/    #   per-tool KLEE output
+├── setup.sh              # pull image, build coreutils (both variants)
+├── run-klee.sh           # KLEE on one tool (paper's flags)
+├── measure-coverage.sh   # klee-replay + gcov on one tool
+├── benchmark-coverage.sh # full Table 2 batch: parallel KLEE + serial gcov
+└── plot-figure5.py       # plot results/coverage.csv → results/figure5.svg
+build/                    # default $WORK — git-ignored
+├── coreutils-6.11/       #   obj-gcov/ and obj-llvm/ builds
+└── klee-out/<tool>/      #   per-tool KLEE output
+results/                  # benchmark-coverage.sh outputs — git-ignored
+├── coverage.csv
+├── batch-<TS>.log
+└── figure5.svg
 ```
 
 ## Known deviations from the paper
